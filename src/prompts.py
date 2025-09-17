@@ -12,7 +12,7 @@ from venv import logger
 import httpx
 from anthropic import Anthropic
 from anthropic.types import TextBlock
-from openai import NOT_GIVEN, OpenAI, api_key
+from openai import NOT_GIVEN, OpenAI, api_key, AzureOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
 from env.base import Env
@@ -26,6 +26,7 @@ class KeyLocs(Enum):
     anthropic_key = "ANTHROPIC_API_KEY"
     together_key = "TOGETHER_API_KEY"
     openrouter_key = "OPENROUTER_API_KEY"
+    azure_key = "AZURE_OPENAI_API_KEY"
 
 
 class Prompter:
@@ -102,6 +103,7 @@ class Prompter:
         "o3-2025-04-16": 100000,
         "o4-mini-2025-04-16": 100000,
         "gpt-5-2025-08-07": 128000,
+        "gpt-5": 128000
     }
 
     openrouter_remap = {
@@ -127,6 +129,8 @@ class Prompter:
         openrouter: bool,
         vllm: bool,
         vllm_port: int,
+        azure: bool = False,
+        azure_api_version: str = "",
     ):
         self.env = env
         self.scenario = scenario
@@ -146,11 +150,12 @@ class Prompter:
             or self.model.startswith("gpt-5")
         )
         self.anthropic = "claude" in model
-        self.openai = (self.openai_reasoning or "gpt" in self.model) and not vllm
+        self.openai = (self.openai_reasoning or "gpt" in self.model) and not vllm and not azure
         self.openrouter = openrouter and not (self.anthropic or self.openai)
         self.vllm = vllm and not (self.anthropic or self.openai or self.openrouter)
         self.anthropic_thinking = model in self.anthropic_thinking_lengths
-
+        self.azure = azure
+        self.azure_api_version = azure_api_version
         self.prompt = self.scenario.build_prompt(
             self.env, self.spec_type, self.safety_prompt, agent=False
         )
@@ -199,6 +204,45 @@ class Prompter:
             if response.stop_reason == "max_tokens":
                 logger.warning(f"Completion was cut off due to length.")
             return [response.content[0].text]
+        except Exception as e:
+            raise e
+        
+    @no_type_check
+    def prompt_azure_openai(self, logger: logging.Logger) -> list[str]:
+        endpoint = "https://noble-m5cw7get-eastus2.cognitiveservices.azure.com/"
+        deployment = self.model
+        subscription_key = os.environ[KeyLocs.azure_key.value]
+        api_version = self.azure_api_version
+
+        client = AzureOpenAI(
+            api_version=api_version,
+            azure_endpoint=endpoint,
+            api_key=subscription_key
+        )
+
+        try:
+            response = client.chat.completions.create(
+                messages = [
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": self.prompt},
+                ],
+                max_completion_tokens = self.openai_max_completion_tokens[self.model],
+                model = deployment
+            )
+            if response.choices is None:
+                logger.error(f"Azure response was None: {response}")
+                raise Exception("No content")
+            content = response.choices[0].message.content
+            if content:
+                if response.usage is not None:
+                    logger.info(
+                        f"Token stats: {response.usage}; around {response.usage.completion_tokens} completion tokens"
+                    )
+                if response.choices[0].finish_reason == "length":
+                    logger.warning(f"Completion was cut off due to length.")
+                return [content]
+            else:
+                raise Exception("No content")
         except Exception as e:
             raise e
 
@@ -426,6 +470,8 @@ class Prompter:
             return self.prompt_openrouter(logger)
         elif self.vllm:
             return self.prompt_vllm(logger)
+        elif self.azure:
+            return self.prompt_azure_openai(logger)
         else:
             return self.prompt_openai_together_batch(logger)
 
@@ -455,6 +501,9 @@ class Prompter:
         n_times_to_sample = (
             self.batch_size if self.openrouter or self.anthropic or self.vllm else 1
         )
+        if self.azure:
+            n_times_to_sample = 1
+
         for i in range(n_times_to_sample):
             retries = 0
             while True:

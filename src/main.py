@@ -69,6 +69,8 @@ def main(args: Any) -> None:
                 reasoning_effort=args.reasoning_effort,
                 openrouter=args.openrouter,
                 vllm=args.vllm,
+                azure=args.azure,
+                azure_api_version=args.azure_api_version,
             )
             for env in envs
             for scenario in scenarios
@@ -282,5 +284,16 @@ if __name__ == "__main__":
         type=int,
         default=8000,
         help="Port for VLLM server",
+    )
+    parser.add_argument(
+        "--azure",
+        action="store_true",
+        help="Use Azure OpenAI deployment",
+    )
+    parser.add_argument(
+        "--azure_api_version",
+        type=str,
+        default="2024-12-01-preview",
+        help="Specify the Azure API version"
     )
     main(parser.parse_args())

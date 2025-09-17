@@ -111,6 +111,8 @@ class Task:
     safety_prompt: str
     openrouter: bool
     vllm: bool
+    azure: bool = False
+    azure_api_version: str = ""
 
     @property
     def id(self) -> str:
@@ -276,6 +278,8 @@ class Task:
                 openrouter=openrouter,
                 vllm=vllm,
                 vllm_port=vllm_port,
+                azure=self.azure,
+                azure_api_version=self.azure_api_version
             )
             logger.info("built prompt:\n%s", prompter.prompt)
             logger.info("-" * 100)

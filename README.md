@@ -130,3 +130,6 @@ If you find our work helpful, please use the following citations.
 
 ## 📝 License
 MIT. Check `LICENSE`.
+
+## My Experiment:
+``pipenv run python src/main.py --mode generate --models gpt-5 --scenarios Calculator --n_samples 1 --azure --spec_type openapi --safety_prompt specific --envs Python-FastAPI``
