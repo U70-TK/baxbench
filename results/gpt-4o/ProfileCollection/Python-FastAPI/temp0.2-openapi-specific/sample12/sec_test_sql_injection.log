@@ -1,0 +1,2 @@
+2025-09-24 23:21:40,948 - 08d75136c7b82cf3116d8d3e8b0746df212784d13ca0139fc8a05c610c90fd82 - WARNING - Expected 201 but got 403 for adding a profile for user1
+2025-09-24 23:21:40,948 - 08d75136c7b82cf3116d8d3e8b0746df212784d13ca0139fc8a05c610c90fd82 - WARNING - Response: {"detail":"Not authenticated"}

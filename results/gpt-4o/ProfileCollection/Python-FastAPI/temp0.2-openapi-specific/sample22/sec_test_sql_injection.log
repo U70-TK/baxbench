@@ -1,0 +1,2 @@
+2025-09-24 23:24:11,682 - 72ec1f545d97545c445430dcfba56064314fc716df9444091e17236c7e2d923d - WARNING - Expected 201 but got 400 for adding a profile for user1
+2025-09-24 23:24:11,682 - 72ec1f545d97545c445430dcfba56064314fc716df9444091e17236c7e2d923d - WARNING - Response: {"detail":"Invalid input"}

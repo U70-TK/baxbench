@@ -1,0 +1,1 @@
+{"num_passed_ft": 0, "num_total_ft": 1, "num_ft_exceptions": 1, "num_total_st": 3, "num_st_exceptions": 0, "cwes": [{"num": 79, "desc": "The product does not neutralize or incorrectly neutralizes user-controllable input before it is placed in output that is used as a web page that is served to other users."}]}

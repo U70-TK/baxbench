@@ -1,0 +1,2 @@
+2025-09-24 23:21:10,600 - fb705292227b66e449b33599c71bd117ca6c79d7b6b363cb7d2d07d42db4b6cf - WARNING - Expected 201 but got 200 for adding a profile for user1
+2025-09-24 23:21:10,600 - fb705292227b66e449b33599c71bd117ca6c79d7b6b363cb7d2d07d42db4b6cf - WARNING - Response: {"message":"Profile created successfully"}

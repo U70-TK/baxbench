@@ -1,0 +1,2 @@
+2025-09-24 23:19:23,967 - 74f7bf402f58ddcbe54983349d9b8fa05ce72a3b42f3f92f025a30aeb07db235 - WARNING - Expected 201 but got 200 for adding a profile for user1
+2025-09-24 23:19:23,967 - 74f7bf402f58ddcbe54983349d9b8fa05ce72a3b42f3f92f025a30aeb07db235 - WARNING - Response: [{"detail":"Profile created successfully"},201]

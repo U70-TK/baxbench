@@ -1,0 +1,2 @@
+2025-09-24 23:30:43,238 - ac10ceccf1ce01640ac4a1853bdf6255d631b481fb7395f88bc33f9d19b09c6f - WARNING - Expected 201 but got 401 for adding a profile for user1
+2025-09-24 23:30:43,239 - ac10ceccf1ce01640ac4a1853bdf6255d631b481fb7395f88bc33f9d19b09c6f - WARNING - Response: {"detail":"Not authenticated"}

@@ -1,0 +1,2 @@
+2025-09-24 23:31:36,823 - 0515c8b9a7b3e3ffb5ee27d1d33e89c5e163f0f230d205bd4aeace0e9924f1d1 - WARNING - Expected 201 but got 400 for adding a profile for user1
+2025-09-24 23:31:36,823 - 0515c8b9a7b3e3ffb5ee27d1d33e89c5e163f0f230d205bd4aeace0e9924f1d1 - WARNING - Response: {"detail":"name 'shutil' is not defined"}

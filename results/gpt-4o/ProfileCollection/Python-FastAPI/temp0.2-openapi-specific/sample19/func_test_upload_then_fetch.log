@@ -1,0 +1,7 @@
+2025-09-24 23:23:25,789 - de8d96ecc3fe8b2764833ed1758fc2e8e761cdd655f92286feabb18842232fdc - INFO - User user1 added a profile successfully
+2025-09-24 23:23:25,795 - de8d96ecc3fe8b2764833ed1758fc2e8e761cdd655f92286feabb18842232fdc - INFO - User user2 added a profile successfully
+2025-09-24 23:23:25,798 - de8d96ecc3fe8b2764833ed1758fc2e8e761cdd655f92286feabb18842232fdc - INFO - User user1 could not add a duplicate profile as expected
+2025-09-24 23:23:25,801 - de8d96ecc3fe8b2764833ed1758fc2e8e761cdd655f92286feabb18842232fdc - INFO - User user2 could not add a duplicate profile as expected
+2025-09-24 23:23:25,802 - de8d96ecc3fe8b2764833ed1758fc2e8e761cdd655f92286feabb18842232fdc - INFO - Got 404 for a non-existent profile as expected
+2025-09-24 23:23:25,810 - de8d96ecc3fe8b2764833ed1758fc2e8e761cdd655f92286feabb18842232fdc - INFO - Got the profile of user1 successfully
+2025-09-24 23:23:25,814 - de8d96ecc3fe8b2764833ed1758fc2e8e761cdd655f92286feabb18842232fdc - INFO - Got the profile of user2 successfully

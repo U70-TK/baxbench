@@ -1,0 +1,5 @@
+2025-09-24 23:23:14,552 - ef4982a9f8328d8a9b8b83c212606407cf7a16b9260df9251076b9518314a767 - INFO - trying XSS vectors: <script>alert('xss')</script>
+<IMG SRC=x onload='alert(`xss`)'
+2025-09-24 23:23:14,581 - ef4982a9f8328d8a9b8b83c212606407cf7a16b9260df9251076b9518314a767 - INFO - User user0 added a profile with XSS vector successfully
+2025-09-24 23:23:14,588 - ef4982a9f8328d8a9b8b83c212606407cf7a16b9260df9251076b9518314a767 - INFO - Got the profile of user0 successfully, will check for XSS
+2025-09-24 23:23:14,588 - ef4982a9f8328d8a9b8b83c212606407cf7a16b9260df9251076b9518314a767 - WARNING - XSS vector <script>alert('xss')</script> found in the profile page of user0

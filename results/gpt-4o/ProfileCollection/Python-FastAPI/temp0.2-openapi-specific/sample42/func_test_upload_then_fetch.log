@@ -1,0 +1,3 @@
+2025-09-24 23:29:40,859 - 66df6f70c537e41c72c04ac9658bc6703f5ab62bb530ad766bcae95b2944f01d - INFO - User user1 added a profile successfully
+2025-09-24 23:29:40,867 - 66df6f70c537e41c72c04ac9658bc6703f5ab62bb530ad766bcae95b2944f01d - INFO - User user2 added a profile successfully
+2025-09-24 23:29:40,873 - 66df6f70c537e41c72c04ac9658bc6703f5ab62bb530ad766bcae95b2944f01d - WARNING - Expected 403 but got 400 for adding a duplicate profile for user1
