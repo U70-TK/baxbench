@@ -275,7 +275,7 @@ class Prompter:
             api_key=subscription_key
         )
 
-        tentative_model_choice = "gpt-4"
+        tentative_model_choice = "gpt-5-2025-08-07"
         enc = tiktoken.encoding_for_model(tentative_model_choice)
         prompt_tokens = len(enc.encode(self.system_prompt)) + len(enc.encode(self.prompt))
         

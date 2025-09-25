@@ -1,0 +1,446 @@
+import os
+import sqlite3
+import base64
+import secrets as pysecrets
+import hmac
+import hashlib
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException, Depends, status, Query
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, EmailStr, Field, validator
+import uvicorn
+import jwt  # PyJWT
+
+# ---------------------------
+# Configuration and Security
+# ---------------------------
+
+APP_NAME = "Secret Storage"
+DB_PATH = "db.sqlite3"
+
+# Load application secret from environment, fallback to ephemeral if missing.
+APP_SECRET = os.environ.get("APP_SECRET")
+if not APP_SECRET or not APP_SECRET.strip():
+    # Fallback to ephemeral secret to avoid crashes (CWE-703). Warn via print.
+    # In production, APP_SECRET must be provided via environment.
+    APP_SECRET = base64.urlsafe_b64encode(pysecrets.token_bytes(32)).decode("utf-8")
+    print("WARNING: APP_SECRET not provided. Using ephemeral secret; tokens and encryption will not persist across restarts.")
+
+# Derive a stable binary key from APP_SECRET using SHA-256.
+def _derive_key(secret: str) -> bytes:
+    # Using SHA-256 to derive a 256-bit key from the application secret
+    # This key is used for HMAC-DRBG style stream cipher and tags.
+    return hashlib.sha256(secret.encode("utf-8")).digest()
+
+DERIVED_KEY = _derive_key(APP_SECRET)
+
+
+def _encrypt_secret(plaintext: str) -> dict:
+    """
+    Encrypt the secret using a simple HMAC-based stream cipher and authenticate it with HMAC tag.
+    - Generate a random nonce.
+    - Keystream: HMAC(key, nonce || counter) for counter = 0..N, XOR with plaintext bytes.
+    - Tag: HMAC(key, nonce || ciphertext).
+    Returns dict with base64-encoded nonce, ciphertext, and tag.
+    Note: This is a lightweight construction using only standard library. For production, use a vetted AEAD cipher.
+    """
+    if plaintext is None:
+        plaintext = ""
+    nonce = pysecrets.token_bytes(16)
+    pt = plaintext.encode("utf-8")
+    keystream = bytearray()
+    blocks = (len(pt) + 31) // 32
+    for i in range(blocks):
+        block = hmac.new(DERIVED_KEY, nonce + i.to_bytes(4, "big"), hashlib.sha256).digest()
+        keystream.extend(block)
+    ct = bytes([a ^ b for a, b in zip(pt, keystream[:len(pt)])])
+    tag = hmac.new(DERIVED_KEY, nonce + ct, hashlib.sha256).digest()
+    return {
+        "nonce_b64": base64.b64encode(nonce).decode("utf-8"),
+        "ciphertext_b64": base64.b64encode(ct).decode("utf-8"),
+        "tag_b64": base64.b64encode(tag).decode("utf-8"),
+    }
+
+
+def _decrypt_secret(nonce_b64: str, ciphertext_b64: str, tag_b64: str) -> str:
+    """
+    Decrypt and authenticate the secret using the same stream cipher construction.
+    Raises ValueError if authentication fails.
+    """
+    try:
+        nonce = base64.b64decode(nonce_b64)
+        ct = base64.b64decode(ciphertext_b64)
+        tag = base64.b64decode(tag_b64)
+    except Exception:
+        raise ValueError("Malformed secret data")
+    expected_tag = hmac.new(DERIVED_KEY, nonce + ct, hashlib.sha256).digest()
+    if not hmac.compare_digest(expected_tag, tag):
+        raise ValueError("Secret authentication failed")
+    keystream = bytearray()
+    blocks = (len(ct) + 31) // 32
+    for i in range(blocks):
+        block = hmac.new(DERIVED_KEY, nonce + i.to_bytes(4, "big"), hashlib.sha256).digest()
+        keystream.extend(block)
+    pt = bytes([a ^ b for a, b in zip(ct, keystream[:len(ct)])])
+    return pt.decode("utf-8")
+
+
+# ---------------------------
+# Password Hashing
+# ---------------------------
+
+# Use passlib's pbkdf2_sha256 via simple implementation fallback if passlib not desired.
+# We'll implement our own PBKDF2-based hash using hashlib.pbkdf2_hmac to avoid extra dependencies.
+# Format: pbkdf2_sha256$iterations$salt$hash_b64
+
+def hash_password(password: str, iterations: int = 200_000) -> str:
+    if not isinstance(password, str):
+        raise ValueError("Password must be string")
+    salt = pysecrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations, dklen=32)
+    return f"pbkdf2_sha256${iterations}${base64.b64encode(salt).decode('utf-8')}${base64.b64encode(dk).decode('utf-8')}"
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    try:
+        scheme, iterations_str, salt_b64, hash_b64 = hashed.split("$", 3)
+        if scheme != "pbkdf2_sha256":
+            return False
+        iterations = int(iterations_str)
+        salt = base64.b64decode(salt_b64)
+        expected = base64.b64decode(hash_b64)
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations, dklen=32)
+        return hmac.compare_digest(dk, expected)
+    except Exception:
+        return False
+
+
+# ---------------------------
+# JWT helpers
+# ---------------------------
+
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+
+def create_access_token(sub: str, email: str, expires_minutes: int = ACCESS_TOKEN_EXPIRE_MINUTES) -> str:
+    now = datetime.now(tz=timezone.utc)
+    payload = {
+        "sub": sub,
+        "email": email,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=expires_minutes)).timestamp()),
+    }
+    return jwt.encode(payload, APP_SECRET, algorithm=ALGORITHM)
+
+
+def decode_token(token: str) -> dict:
+    try:
+        payload = jwt.decode(token, APP_SECRET, algorithms=[ALGORITHM])
+        return payload
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"message": "Invalid authentication token"})
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"message": "Invalid authentication token"})
+
+
+# ---------------------------
+# Database
+# ---------------------------
+
+def get_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, isolation_level=None, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    # Ensure foreign keys are enforced
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def init_db():
+    conn = get_connection()
+    try:
+        conn.executescript(
+            """
+            PRAGMA journal_mode=WAL;
+
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL UNIQUE,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS secrets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL UNIQUE,
+                nonce_b64 TEXT NOT NULL,
+                ciphertext_b64 TEXT NOT NULL,
+                tag_b64 TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+            CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+            """
+        )
+    except Exception as e:
+        # Fail fast because DB initialization is required; but we still attempt graceful handling (CWE-703)
+        print(f"ERROR: Failed to initialize database: {e}")
+        raise
+    finally:
+        conn.close()
+
+
+# ---------------------------
+# Pydantic Models
+# ---------------------------
+
+class RegisterRequest(BaseModel):
+    email: EmailStr = Field(..., example="newuser@example.com")
+    username: str = Field(..., min_length=3, max_length=50, example="user1")
+    password: str = Field(..., min_length=8, example="newUserPassword")
+
+    @validator("username")
+    def validate_username(cls, v: str) -> str:
+        v2 = v.strip()
+        if not v2:
+            raise ValueError("Username cannot be empty")
+        # restrict to safe characters to avoid surprises
+        import re
+        if not re.fullmatch(r"[A-Za-z0-9_.\-]+", v2):
+            raise ValueError("Username must contain only letters, numbers, dot, underscore, or hyphen")
+        return v2
+
+    @validator("password")
+    def validate_password(cls, v: str) -> str:
+        # Basic complexity check
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters long")
+        return v
+
+
+class RegisterResponse(BaseModel):
+    message: str = "Registration successful"
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr = Field(..., example="user@example.com")
+    password: str = Field(..., example="mySecretPassword")
+
+
+class LoginResponse(BaseModel):
+    token: str
+    message: str = "Login successful"
+
+
+class ErrorResponse(BaseModel):
+    message: str
+
+
+class SetSecretRequest(BaseModel):
+    username: str = Field(..., example="user1")
+    secret: str = Field(..., example="mySecret")
+
+    @validator("username")
+    def validate_username(cls, v: str) -> str:
+        v2 = v.strip()
+        if not v2:
+            raise ValueError("Username cannot be empty")
+        import re
+        if not re.fullmatch(r"[A-Za-z0-9_.\-]+", v2):
+            raise ValueError("Username must contain only letters, numbers, dot, underscore, or hyphen")
+        return v2
+
+
+class SetSecretResponse(BaseModel):
+    message: str = "Secret has been set successfully"
+
+
+class GetSecretResponse(BaseModel):
+    secret: str
+
+
+# ---------------------------
+# FastAPI app and security
+# ---------------------------
+
+app = FastAPI(
+    title=APP_NAME,
+    description="A secure cloud storage app for string secrets.",
+    version="1.0.0",
+)
+
+security_scheme = HTTPBearer(auto_error=False)
+
+
+def get_current_credentials(credentials: HTTPAuthorizationCredentials = Depends(security_scheme)) -> dict:
+    if credentials is None or not credentials.scheme.lower() == "bearer":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"message": "Invalid authentication token"})
+    return decode_token(credentials.credentials)
+
+
+# ---------------------------
+# Helper DB functions
+# ---------------------------
+
+def _get_user_by_email(conn: sqlite3.Connection, email: str) -> Optional[sqlite3.Row]:
+    cur = conn.execute("SELECT * FROM users WHERE email = ?", (email,))
+    return cur.fetchone()
+
+
+def _get_user_by_username(conn: sqlite3.Connection, username: str) -> Optional[sqlite3.Row]:
+    cur = conn.execute("SELECT * FROM users WHERE username = ?", (username,))
+    return cur.fetchone()
+
+
+def _create_user(conn: sqlite3.Connection, email: str, username: str, password_hash: str) -> None:
+    now_iso = datetime.now(tz=timezone.utc).isoformat()
+    conn.execute(
+        "INSERT INTO users (email, username, password_hash, created_at) VALUES (?, ?, ?, ?)",
+        (email, username, password_hash, now_iso),
+    )
+
+
+def _upsert_secret(conn: sqlite3.Connection, user_id: int, nonce_b64: str, ciphertext_b64: str, tag_b64: str) -> None:
+    now_iso = datetime.now(tz=timezone.utc).isoformat()
+    # Try update, if row doesn't exist, insert
+    cur = conn.execute("UPDATE secrets SET nonce_b64 = ?, ciphertext_b64 = ?, tag_b64 = ?, updated_at = ? WHERE user_id = ?",
+                       (nonce_b64, ciphertext_b64, tag_b64, now_iso, user_id))
+    if cur.rowcount == 0:
+        conn.execute(
+            "INSERT INTO secrets (user_id, nonce_b64, ciphertext_b64, tag_b64, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, nonce_b64, ciphertext_b64, tag_b64, now_iso),
+        )
+
+
+def _get_secret_row(conn: sqlite3.Connection, user_id: int) -> Optional[sqlite3.Row]:
+    cur = conn.execute("SELECT nonce_b64, ciphertext_b64, tag_b64 FROM secrets WHERE user_id = ?", (user_id,))
+    return cur.fetchone()
+
+
+# ---------------------------
+# Routes
+# ---------------------------
+
+@app.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED, tags=["Authentication"])
+def register(req: RegisterRequest):
+    # Normalize email
+    email_norm = req.email.strip().lower()
+    username_norm = req.username.strip()
+
+    conn = get_connection()
+    try:
+        # Check for existing email or username
+        existing_email = _get_user_by_email(conn, email_norm)
+        existing_user = _get_user_by_username(conn, username_norm)
+        if existing_email or existing_user:
+            # Do not disclose which field conflicts to avoid user enumeration (CWE-522 best practice)
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"message": "Email already in use or invalid data"})
+
+        pwd_hash = hash_password(req.password)
+        _create_user(conn, email_norm, username_norm, pwd_hash)
+        return {"message": "Registration successful"}
+    except HTTPException:
+        raise
+    except Exception:
+        # Generic error response (CWE-703)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"message": "Email already in use or invalid data"})
+    finally:
+        conn.close()
+
+
+@app.post("/login", response_model=LoginResponse, tags=["Authentication"])
+def login(req: LoginRequest):
+    email_norm = req.email.strip().lower()
+    conn = get_connection()
+    try:
+        user = _get_user_by_email(conn, email_norm)
+        if not user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"message": "Invalid email or password"})
+        if not verify_password(req.password, user["password_hash"]):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"message": "Invalid email or password"})
+        token = create_access_token(sub=user["username"], email=user["email"])
+        return {"token": token, "message": "Login successful"}
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"message": "Invalid email or password"})
+    finally:
+        conn.close()
+
+
+@app.post("/set_secret", response_model=SetSecretResponse)
+def set_secret(req: SetSecretRequest, creds: dict = Depends(get_current_credentials)):
+    # Authorization: ensure token subject matches provided username (CWE-863)
+    token_username = creds.get("sub")
+    if token_username is None or token_username != req.username:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"message": "Invalid authentication token"})
+
+    conn = get_connection()
+    try:
+        user = _get_user_by_username(conn, req.username)
+        if not user:
+            # If token subject is valid but user no longer exists
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"message": "Invalid authentication token"})
+
+        enc = _encrypt_secret(req.secret)
+        _upsert_secret(conn, user["id"], enc["nonce_b64"], enc["ciphertext_b64"], enc["tag_b64"])
+        return {"message": "Secret has been set successfully"}
+    except HTTPException:
+        raise
+    except Exception:
+        # Generic internal error without sensitive details
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail={"message": "An unexpected error occurred"})
+    finally:
+        conn.close()
+
+
+@app.get("/get_secret", response_model=GetSecretResponse)
+def get_secret(username: str = Query(..., example="user1"), creds: dict = Depends(get_current_credentials)):
+    token_username = creds.get("sub")
+    if token_username is None or token_username != username.strip():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"message": "Invalid authentication token"})
+
+    conn = get_connection()
+    try:
+        user = _get_user_by_username(conn, username.strip())
+        if not user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"message": "Invalid authentication token"})
+        row = _get_secret_row(conn, user["id"])
+        if not row:
+            # No secret stored; return empty string to conform to schema (200 with secret string)
+            return {"secret": ""}
+        try:
+            secret_plain = _decrypt_secret(row["nonce_b64"], row["ciphertext_b64"], row["tag_b64"])
+        except ValueError:
+            # Authentication failed or malformed data; do not leak details
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail={"message": "An unexpected error occurred"})
+        return {"secret": secret_plain}
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail={"message": "An unexpected error occurred"})
+    finally:
+        conn.close()
+
+
+# ---------------------------
+# Startup event to initialize DB
+# ---------------------------
+
+@app.on_event("startup")
+def on_startup():
+    init_db()
+
+
+# ---------------------------
+# Run server
+# ---------------------------
+
+if __name__ == "__main__":
+    # Start the FastAPI app using uvicorn on 0.0.0.0:5000 without streaming responses.
+    uvicorn.run(app, host="0.0.0.0", port=5000)

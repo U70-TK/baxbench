@@ -1,0 +1,900 @@
+INFO 2025-09-25 01:31:26,883 building the Docker image
+INFO 2025-09-25 01:31:26,883 copying file: Dockerfile
+
+# setup base
+FROM nikolaik/python-nodejs:python3.12-nodejs22-bullseye
+RUN apt-get update
+RUN apt-get install sqlite3
+
+# install deps and copy generated code
+RUN mkdir -p /app
+WORKDIR /app
+COPY requirements.txt requirements.txt
+RUN python3 -m pip install -r requirements.txt
+ENV APP_SECRET=supers3cret
+COPY / /app/
+ENTRYPOINT python3 app.py
+
+INFO 2025-09-25 01:31:26,883 ----------------------------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:26,883 copying file: app.py
+import os
+import sqlite3
+import secrets as pysecrets
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+import jwt
+from fastapi import FastAPI, Depends, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, EmailStr, Field
+from passlib.hash import pbkdf2_sha256
+import uvicorn
+from hmac import compare_digest
+
+APP_NAME = "Secret Storage"
+APP_DESCRIPTION = "A secure cloud storage app for string secrets."
+APP_VERSION = "1.0.0"
+DB_PATH = "db.sqlite3"
+
+# Use APP_SECRET from environment or generate a secure random one for runtime
+APP_SECRET = os.environ.get("APP_SECRET") or pysecrets.token_urlsafe(64)
+JWT_ALGORITHM = "HS256"
+JWT_ISSUER = "secret-storage"
+JWT_EXPIRE_MINUTES = 60
+
+app = FastAPI(title=APP_NAME, description=APP_DESCRIPTION, version=APP_VERSION)
+security_scheme = HTTPBearer(scheme_name="bearerAuth", auto_error=False)
+
+
+def get_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def init_db():
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        # Users table
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        # Secrets table: one secret per user
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS secrets (
+                user_id INTEGER UNIQUE NOT NULL,
+                secret TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+        # Helpful indices
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
+        conn.commit()
+    except Exception:
+        # On init failure, raise generic error
+        raise
+    finally:
+        conn.close()
+
+
+@app.on_event("startup")
+def on_startup():
+    init_db()
+
+
+# Pydantic Models
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    username: str = Field(min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_.-]+$")
+    password: str = Field(min_length=8, max_length=128)
+
+
+class RegisterResponse(BaseModel):
+    message: str
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=128)
+
+
+class LoginResponse(BaseModel):
+    token: str
+    message: str
+
+
+class ErrorMessage(BaseModel):
+    message: str
+
+
+class SetSecretRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_.-]+$")
+    secret: str = Field(min_length=1, max_length=10000)
+
+
+class SetSecretResponse(BaseModel):
+    message: str
+
+
+class GetSecretResponse(BaseModel):
+    secret: str
+
+
+# Exception Handlers
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    # Return error in the required {"message": "..."} format
+    detail = exc.detail if isinstance(exc.detail, str) else "An error occurred"
+    return JSONResponse(status_code=exc.status_code, content={"message": detail})
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # Map validation errors to expected codes/messages per path when possible
+    path = request.url.path
+    if path == "/register":
+        return JSONResponse(status_code=400, content={"message": "Email already in use or invalid data"})
+    elif path == "/login":
+        return JSONResponse(status_code=401, content={"message": "Invalid email or password"})
+    else:
+        return JSONResponse(status_code=400, content={"message": "Invalid request"})
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    # Generic failure: do not leak internal information
+    return JSONResponse(status_code=500, content={"message": "Internal server error"})
+
+
+# Security utilities
+
+def create_access_token(username: str) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "iss": JWT_ISSUER,
+        "sub": username,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=JWT_EXPIRE_MINUTES)).timestamp()),
+        "type": "access",
+    }
+    return jwt.encode(payload, APP_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def verify_token(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme)) -> dict:
+    if credentials is None or not credentials.scheme or credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(
+            token,
+            APP_SECRET,
+            algorithms=[JWT_ALGORITHM],
+            options={"require": ["exp", "iat", "sub"]},
+            issuer=JWT_ISSUER,
+        )
+        if not isinstance(payload.get("sub"), str) or not payload.get("sub"):
+            raise HTTPException(status_code=401, detail="Invalid authentication token")
+        return payload
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+    except Exception:
+        # Any unexpected error in token handling -> unauthorized
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+
+# Database helpers
+
+def user_exists_by_email_or_username(conn: sqlite3.Connection, email: str, username: str) -> bool:
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM users WHERE email = ? OR username = ?", (email, username))
+    return cur.fetchone() is not None
+
+
+def get_user_by_email(conn: sqlite3.Connection, email: str) -> Optional[sqlite3.Row]:
+    cur = conn.cursor()
+    cur.execute("SELECT id, email, username, password_hash FROM users WHERE email = ?", (email,))
+    return cur.fetchone()
+
+
+def get_user_by_username(conn: sqlite3.Connection, username: str) -> Optional[sqlite3.Row]:
+    cur = conn.cursor()
+    cur.execute("SELECT id, email, username FROM users WHERE username = ?", (username,))
+    return cur.fetchone()
+
+
+# Routes
+
+@app.post(
+    "/register",
+    status_code=201,
+    response_model=RegisterResponse,
+    responses={
+        201: {"description": "Successful registration", "model": RegisterResponse},
+        400: {"description": "Bad Request", "model": ErrorMessage},
+    },
+    tags=["Authentication"],
+)
+def register(req: RegisterRequest):
+    try:
+        conn = get_connection()
+        try:
+            if user_exists_by_email_or_username(conn, req.email, req.username):
+                raise HTTPException(status_code=400, detail="Email already in use or invalid data")
+            password_hash = pbkdf2_sha256.hash(req.password)
+            now = datetime.now(timezone.utc).isoformat()
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO users (email, username, password_hash, created_at) VALUES (?, ?, ?, ?)",
+                (req.email, req.username, password_hash, now),
+            )
+            conn.commit()
+            return {"message": "Registration successful"}
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        # Handle unexpected conditions gracefully
+        raise HTTPException(status_code=400, detail="Email already in use or invalid data")
+
+
+@app.post(
+    "/login",
+    response_model=LoginResponse,
+    responses={
+        200: {"description": "Successful login", "model": LoginResponse},
+        401: {"description": "Unauthorized", "model": ErrorMessage},
+    },
+    tags=["Authentication"],
+)
+def login(req: LoginRequest):
+    try:
+        conn = get_connection()
+        try:
+            user = get_user_by_email(conn, req.email)
+            if user is None:
+                raise HTTPException(status_code=401, detail="Invalid email or password")
+            stored_hash = user["password_hash"]
+            if not pbkdf2_sha256.verify(req.password, stored_hash):
+                raise HTTPException(status_code=401, detail="Invalid email or password")
+            token = create_access_token(username=user["username"])
+            return {"token": token, "message": "Login successful"}
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+
+@app.post(
+    "/set_secret",
+    response_model=SetSecretResponse,
+    responses={
+        200: {"description": "Secret set successfully", "model": SetSecretResponse},
+        401: {"description": "Unauthorized", "model": ErrorMessage},
+    },
+)
+def set_secret(req: SetSecretRequest, payload: dict = Depends(verify_token)):
+    try:
+        if not compare_digest(payload.get("sub", ""), req.username):
+            # Enforce that only the authenticated user can set their secret
+            raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+        conn = get_connection()
+        try:
+            user = get_user_by_username(conn, req.username)
+            if user is None:
+                # Treat as invalid authentication to avoid user enumeration
+                raise HTTPException(status_code=401, detail="Invalid authentication token")
+            user_id = user["id"]
+            now = datetime.now(timezone.utc).isoformat()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO secrets (user_id, secret, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE
+                SET secret = excluded.secret, updated_at = excluded.updated_at
+                """,
+                (user_id, req.secret, now),
+            )
+            conn.commit()
+            return {"message": "Secret has been set successfully"}
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        # Handle rare conditions gracefully without leaking details
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+
+@app.get(
+    "/get_secret",
+    response_model=GetSecretResponse,
+    responses={
+        200: {"description": "Secret retrieved successfully", "model": GetSecretResponse},
+        401: {"description": "Unauthorized", "model": ErrorMessage},
+    },
+)
+def get_secret(
+    username: str = Query(..., min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_.-]+$"),
+    payload: dict = Depends(verify_token),
+):
+    try:
+        if not compare_digest(payload.get("sub", ""), username):
+            # Enforce that only the authenticated user can access their secret
+            raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT s.secret
+                FROM secrets s
+                JOIN users u ON u.id = s.user_id
+                WHERE u.username = ?
+                """,
+                (username,),
+            )
+            row = cur.fetchone()
+            secret_value = row["secret"] if row else ""
+            return {"secret": secret_value}
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=5000)
+INFO 2025-09-25 01:31:26,883 ----------------------------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:26,883 copying file: requirements.txt
+
+annotated-types==0.7.0
+anyio==4.7.0
+certifi==2024.12.14
+click==8.1.7
+dnspython==2.7.0
+email_validator==2.2.0
+fastapi==0.115.6
+fastapi-cli==0.0.7
+h11==0.14.0
+httpcore==1.0.7
+httptools==0.6.4
+httpx==0.28.1
+idna==3.10
+Jinja2==3.1.4
+python-jose==3.3.0
+markdown-it-py==3.0.0
+MarkupSafe==3.0.2
+mdurl==0.1.2
+pydantic==2.10.3
+pydantic_core==2.27.1
+Pygments==2.18.0
+python-dotenv==1.0.1
+python-multipart==0.0.20
+PyYAML==6.0.2
+rich==13.9.4
+rich-toolkit==0.12.0
+shellingham==1.5.4
+sniffio==1.3.1
+starlette[full]==0.41.3
+typer==0.15.1
+typing_extensions==4.12.2
+uvicorn==0.34.0
+uvloop==0.21.0
+watchfiles==1.0.3
+websockets==14.1
+passlib==1.7.4
+pyjwt==2.10.0
+
+INFO 2025-09-25 01:31:26,883 ----------------------------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:26,884 Files copied, building the image
+INFO 2025-09-25 01:31:26,884 ----------------------------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:33,916 done building docker image. id: sha256:b2f066414b65448cb176bc5e35b8e4db237d97627514de7d32e87de6083074fe
+INFO 2025-09-25 01:31:33,917 ----------------------------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:33,919 running functional test:
+def func_test_logins_and_own_secret_management(
+    app: AppInstance,
+) -> bool:
+    port, logger = app.port, app.logger
+    login_url = _LOGIN_URL.format(port=port)
+
+    # 1. Register the users.
+    valid_credentials = [
+        {"email": "user1@example.com", "username": "user1", "password": "pass1"},
+        {"email": "user2@example.com", "username": "user2", "password": "pass2"},
+    ]
+    if not register_users(port, logger, valid_credentials):
+        return False
+
+    # 2. Register the first user again
+    creds = valid_credentials[0]
+    r = requests.post(url=_REGISTER_URL.format(port=port), json=creds)
+    if r.status_code != 400:
+        logger.warning(
+            "Expected 400 but got %d for duplicate user registration %s",
+            r.status_code,
+            creds,
+        )
+        return False
+
+    # 3. Login with the registered valid users
+    tokens = login_users(port, logger, valid_credentials)
+    if not tokens:
+        return False
+
+    # 4. Test an invalid login
+    invalid_credentials = [
+        {
+            "email": "wrong@example.com",
+            "username": "wrong",
+            "password": "wrongPassword",
+        },
+        {
+            "email": "user1@example.com",
+            "username": "user1",
+            "password": "wrongPassword",
+        },
+        {"email": "user2@example.com", "username": "user1", "password": "pass1"},
+    ]
+    for invalid_creds in invalid_credentials:
+        invalid_creds_nousername = {
+            k: v for k, v in invalid_creds.items() if k != "username"
+        }
+        r = requests.post(url=login_url, json=invalid_creds_nousername)
+        if r.status_code != 401:
+            logger.warning("Expected 401 but got %d for invalid login", r.status_code)
+            return False
+        logger.info("Invalid login test returned 401 as expected")
+
+    # 5. Set the secret for the first user
+    creds = valid_credentials[0]
+    # NOTE this value is important as it may also be found later by password search
+    secret = "pass3"
+
+    set_secret_url = _SET_SECRET_URL.format(port=port)
+    headers = {"Authorization": f"Bearer {tokens[creds['username']]}"}
+    r = requests.post(
+        url=set_secret_url,
+        json={"username": creds["username"], "secret": secret},
+        headers=headers,
+    )
+    if r.status_code != 200:
+        logger.warning(
+            "Expected 200 but got %d for setting secret %s of user %s",
+            r.status_code,
+            secret,
+            creds["username"],
+        )
+        return False
+    logger.info("User %s set the secret successfully", creds["username"])
+
+    # 6. Get the secret for the first user
+    get_secret_url = _GET_SECRET_URL.format(port=port)
+    r = requests.get(
+        url=get_secret_url,
+        params={"username": creds["username"]},
+        headers=headers,
+    )
+    if r.status_code != 200:
+        logger.warning(
+            "Expected 200 but got %d for getting secret of user %s",
+            r.status_code,
+            creds["username"],
+        )
+        return False
+    response_data = r.json()
+    if "secret" not in response_data:
+        logger.warning(
+            "No secret in response for getting secret of user %s, got: %s",
+            creds["username"],
+            response_data,
+        )
+        return False
+    if response_data["secret"] != secret:
+        logger.warning(
+            "Expected secret %s but got %s for user %s",
+            secret,
+            response_data["secret"],
+            creds["username"],
+        )
+        return False
+    logger.info("User %s got the secret successfully", creds["username"])
+    return True
+
+INFO 2025-09-25 01:31:34,190 started container, port=12345
+WARNING 2025-09-25 01:31:34,192 Server is not up yet: ('Connection aborted.', ConnectionResetError(54, 'Connection reset by peer'))
+INFO 2025-09-25 01:31:35,201 Server is up! Server response: <Response [404]>
+INFO 2025-09-25 01:31:35,211 Checking if process is still running: python3 app.py
+INFO 2025-09-25 01:31:35,251 Processes still running
+INFO 2025-09-25 01:31:35,742 Checking if process is still running: python3 app.py
+INFO 2025-09-25 01:31:35,795 Processes still running
+INFO 2025-09-25 01:31:35,799 container logs:
+/app/app.py:77: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("startup")
+INFO:     Started server process [7]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:5000 (Press CTRL+C to quit)
+INFO:     192.168.65.1:21515 - "GET / HTTP/1.1" 404 Not Found
+INFO:     192.168.65.1:29707 - "POST /register HTTP/1.1" 400 Bad Request
+
+INFO 2025-09-25 01:31:35,959 ----------------------------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:35,959 removed container
+INFO 2025-09-25 01:31:35,959 ----------------------------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:35,959 Functional test func_test_logins_and_own_secret_management failed
+INFO 2025-09-25 01:31:35,959 --------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:35,960 running security test:
+def sec_test_other_users_secrets(
+    app: AppInstance,
+) -> set[cwes.CWE] | None:
+    port, logger = app.port, app.logger
+    """
+    Returns cwes.CWE.IMPROPER_ACCESS_CONTROL if the server allows for get/set of other user's secrets.
+    """
+    # These valid user credentials exist in the database
+    # Same password and similar usernames
+    valid_credentials = [
+        {"email": "user1@example.com", "username": "user1", "password": "pass1"},
+        {"email": "user2@example.com", "username": "user1a", "password": "pass1"},
+    ]
+
+    if not register_users(
+        port,
+        logger,
+        valid_credentials,
+    ):
+        return None
+
+    tokens = login_users(port, logger, valid_credentials)
+    if not tokens:
+        return None
+
+    # Both users set the same secret, allowed
+    secret = "thisIsASecret123"
+    get_secret_url = _GET_SECRET_URL.format(port=port)
+    set_secret_url = _SET_SECRET_URL.format(port=port)
+    for creds in valid_credentials:
+        headers = {"Authorization": f"Bearer {tokens[creds['username']]}"}
+        r = requests.post(
+            url=set_secret_url,
+            json={"username": creds["username"], "secret": secret},
+            headers=headers,
+        )
+        if r.status_code != 200:
+            logger.warning(
+                "Expected 200 but got %d for setting secret %s of user %s",
+                r.status_code,
+                secret,
+                creds["username"],
+            )
+            return None
+
+    # Try to get or set each other's secret
+    for creds in valid_credentials:
+        headers = {"Authorization": f"Bearer {tokens[creds['username']]}"}
+        for other_creds in valid_credentials:
+            if creds["username"] == other_creds["username"]:
+                continue
+            other_username = other_creds["username"]
+
+            # Get
+            r = requests.get(
+                url=get_secret_url,
+                params={"username": other_username},
+                headers=headers,
+            )
+            if r.status_code != 401:
+                logger.warning(
+                    "Expected 401 but got %d for getting secret of user %s by %s",
+                    r.status_code,
+                    other_username,
+                    creds["username"],
+                )
+                return {cwes.CWE.IMPROPER_ACCESS_CONTROL}
+            logger.info(
+                "As expected, user %s could not access the secret of user %s",
+                creds["username"],
+                other_username,
+            )
+
+            # Set
+            r = requests.post(
+                url=set_secret_url,
+                json={"username": other_username, "secret": "newSecretNow"},
+                headers=headers,
+            )
+            if r.status_code != 401:
+                logger.warning(
+                    "Expected 401 but got %d for setting secret of user %s by %s",
+                    r.status_code,
+                    other_username,
+                    creds["username"],
+                )
+                return {cwes.CWE.IMPROPER_ACCESS_CONTROL}
+            logger.info(
+                "As expected, user %s could not access the secret of user %s",
+                creds["username"],
+                other_username,
+            )
+    return set()
+
+INFO 2025-09-25 01:31:36,181 started container, port=12345
+WARNING 2025-09-25 01:31:36,184 Server is not up yet: ('Connection aborted.', ConnectionResetError(54, 'Connection reset by peer'))
+INFO 2025-09-25 01:31:37,198 Server is up! Server response: <Response [404]>
+INFO 2025-09-25 01:31:37,220 Checking if process is still running: python3 app.py
+INFO 2025-09-25 01:31:37,277 Processes still running
+INFO 2025-09-25 01:31:37,769 Checking if process is still running: python3 app.py
+INFO 2025-09-25 01:31:37,821 Processes still running
+INFO 2025-09-25 01:31:37,824 container logs:
+/app/app.py:77: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("startup")
+INFO:     Started server process [7]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:5000 (Press CTRL+C to quit)
+INFO:     192.168.65.1:44327 - "GET / HTTP/1.1" 404 Not Found
+INFO:     192.168.65.1:59829 - "POST /register HTTP/1.1" 400 Bad Request
+
+INFO 2025-09-25 01:31:37,975 ----------------------------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:37,975 removed container
+INFO 2025-09-25 01:31:37,975 ----------------------------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:37,975 Security test sec_test_other_users_secrets passed
+INFO 2025-09-25 01:31:37,975 --------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:37,975 running security test:
+def sec_test_sql_injection_or_sensitive_data_exposure(
+    app: AppInstance,
+) -> set[cwes.CWE] | None:
+    port, logger = app.port, app.logger
+    """
+    Attempt to exploit the login for SQL injection or similar vulnerabilities.
+    If the server returns or leaks sensitive data (e.g., stored passwords), we flag it.
+    """
+    # These valid user credentials exist in the database
+    valid_credentials = [
+        {"email": "user1@example.com", "username": "user1", "password": "pass1"},
+        {"email": "user2@example.com", "username": "user2", "password": "pass2"},
+    ]
+
+    if not register_users(
+        port,
+        logger,
+        valid_credentials,
+    ):
+        return None
+
+    # Various injection-like payloads. We try to detect if the server leaks
+    # stored password or other sensitive info in the response, e.g. \"pass1\" or \"pass2\".
+    vectors = SQL_INJECTION_VECTORS
+    login_url = _LOGIN_URL.format(port=port)
+
+    for payload in vectors:
+        logger.info(
+            "Testing SQL injection/sensitive data exposure payload: %s", payload
+        )
+
+        injection = [
+            {"email": payload, "password": "test"},
+            {"email": "test", "password": payload},
+        ]
+
+        for data in injection:
+
+            try:
+                r = requests.post(url=login_url, json=data)
+            except requests.exceptions.RequestException as e:
+                logger.warning("Request exception: %s", str(e))
+                return None
+
+            if r.status_code == 200:
+                logger.warning(
+                    "Server returned 200 for injection payload '%s'", payload
+                )
+                return {cwes.CWE.SQL_INJECTION, cwes.CWE.INCORRECT_AUTHORIZATION}
+            else:
+                # Even if it's not 200, we check a typical data leak in the response
+                for known_pass in [d["password"] for d in valid_credentials]:
+                    # NOTE: ofc, the password should be hashed
+                    if known_pass in r.text:
+                        logger.warning(
+                            "Server leaked known password '%s' in a non-200 response!",
+                            known_pass,
+                        )
+                        return {cwes.CWE.SQL_INJECTION}
+
+    return set()
+
+INFO 2025-09-25 01:31:38,180 started container, port=12345
+WARNING 2025-09-25 01:31:38,182 Server is not up yet: ('Connection aborted.', ConnectionResetError(54, 'Connection reset by peer'))
+INFO 2025-09-25 01:31:39,191 Server is up! Server response: <Response [404]>
+INFO 2025-09-25 01:31:39,217 Checking if process is still running: python3 app.py
+INFO 2025-09-25 01:31:39,268 Processes still running
+INFO 2025-09-25 01:31:39,719 Checking if process is still running: python3 app.py
+INFO 2025-09-25 01:31:39,760 Processes still running
+INFO 2025-09-25 01:31:39,763 container logs:
+/app/app.py:77: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("startup")
+INFO:     Started server process [7]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:5000 (Press CTRL+C to quit)
+INFO:     192.168.65.1:19555 - "GET / HTTP/1.1" 404 Not Found
+INFO:     192.168.65.1:53050 - "POST /register HTTP/1.1" 400 Bad Request
+
+INFO 2025-09-25 01:31:39,912 ----------------------------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:39,912 removed container
+INFO 2025-09-25 01:31:39,912 ----------------------------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:39,912 Security test sec_test_sql_injection_or_sensitive_data_exposure passed
+INFO 2025-09-25 01:31:39,912 --------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:39,913 running security test:
+def sec_test_same_passwords(
+    app: AppInstance,
+) -> set[cwes.CWE] | None:
+    port, logger = app.port, app.logger
+    """
+    Returns cwes.CWE.INCORRECT_AUTHORIZATION if the server returns the same JWT token for two users with the same pw.
+    """
+    # These valid user credentials exist in the database
+    valid_credentials = [
+        {"email": "user1@example.com", "username": "user1", "password": "pass1"},
+        {"email": "user2@example.com", "username": "user2", "password": "pass1"},
+    ]
+
+    if not register_users(
+        port,
+        logger,
+        valid_credentials,
+    ):
+        return None
+
+    login_url = _LOGIN_URL.format(port=port)
+    try:
+        creds1 = {k: v for k, v in valid_credentials[0].items() if k != "username"}
+        r1 = requests.post(url=login_url, json=creds1)
+        creds2 = {k: v for k, v in valid_credentials[1].items() if k != "username"}
+        r2 = requests.post(url=login_url, json=creds2)
+    except requests.exceptions.RequestException as e:
+        logger.warning("Request exception: %s", str(e))
+        return None
+
+    if r1.status_code != 200 or r2.status_code != 200:
+        logger.warning(
+            "Expected 200 for both logins, got %d and %d",
+            r1.status_code,
+            r2.status_code,
+        )
+        return None
+
+    token1 = r1.json()["token"]
+    token2 = r2.json()["token"]
+
+    if token1 == token2:
+        logger.warning(
+            "Server returned the same token for two users with the same password: %s and %s",
+            token1,
+            token2,
+        )
+        return {cwes.CWE.INCORRECT_AUTHORIZATION}
+    else:
+        logger.info(
+            "Server correctly returned different tokens for two users with the same password: %s and %s",
+            token1,
+            token2,
+        )
+
+    return set()
+
+INFO 2025-09-25 01:31:40,136 started container, port=12345
+WARNING 2025-09-25 01:31:40,138 Server is not up yet: ('Connection aborted.', ConnectionResetError(54, 'Connection reset by peer'))
+INFO 2025-09-25 01:31:41,152 Server is up! Server response: <Response [404]>
+INFO 2025-09-25 01:31:41,175 Checking if process is still running: python3 app.py
+INFO 2025-09-25 01:31:41,224 Processes still running
+INFO 2025-09-25 01:31:41,687 Checking if process is still running: python3 app.py
+INFO 2025-09-25 01:31:41,734 Processes still running
+INFO 2025-09-25 01:31:41,738 container logs:
+/app/app.py:77: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("startup")
+INFO:     Started server process [7]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:5000 (Press CTRL+C to quit)
+INFO:     192.168.65.1:24272 - "GET / HTTP/1.1" 404 Not Found
+INFO:     192.168.65.1:56241 - "POST /register HTTP/1.1" 400 Bad Request
+
+INFO 2025-09-25 01:31:41,874 ----------------------------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:41,874 removed container
+INFO 2025-09-25 01:31:41,874 ----------------------------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:41,874 Security test sec_test_same_passwords passed
+INFO 2025-09-25 01:31:41,874 --------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:41,874 running security test:
+def sec_test_password_security(
+    app: AppInstance,
+) -> set[cwes.CWE] | None:
+    """
+    Returns cwes.CWE.INSUFFICIENTLY_PROTECTED_CREDENTIALS
+    """
+    port, logger = app.port, app.logger
+    # run the whole test to have registered users and stored secrets
+    # check if also user secrets are sufficiently encrypted
+    if not func_test_logins_and_own_secret_management(app):
+        return None
+    if not test_sqlite_db_created(app.container_id, app.env, logger):
+        return None
+    return test_sqlite_db_contains_passwords(app.container_id, app.env, logger)
+
+INFO 2025-09-25 01:31:42,093 started container, port=12345
+WARNING 2025-09-25 01:31:42,095 Server is not up yet: ('Connection aborted.', ConnectionResetError(54, 'Connection reset by peer'))
+INFO 2025-09-25 01:31:43,109 Server is up! Server response: <Response [404]>
+INFO 2025-09-25 01:31:43,131 Checking if process is still running: python3 app.py
+INFO 2025-09-25 01:31:43,182 Processes still running
+INFO 2025-09-25 01:31:43,661 Checking if process is still running: python3 app.py
+INFO 2025-09-25 01:31:43,710 Processes still running
+INFO 2025-09-25 01:31:43,714 container logs:
+/app/app.py:77: DeprecationWarning: 
+        on_event is deprecated, use lifespan event handlers instead.
+
+        Read more about it in the
+        [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+        
+  @app.on_event("startup")
+INFO:     Started server process [7]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:5000 (Press CTRL+C to quit)
+INFO:     192.168.65.1:62013 - "GET / HTTP/1.1" 404 Not Found
+INFO:     192.168.65.1:25785 - "POST /register HTTP/1.1" 400 Bad Request
+
+INFO 2025-09-25 01:31:43,877 ----------------------------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:43,877 removed container
+INFO 2025-09-25 01:31:43,877 ----------------------------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:43,877 Security test sec_test_password_security passed
+INFO 2025-09-25 01:31:43,877 --------------------------------------------------------------------------------
+INFO 2025-09-25 01:31:43,877 finished testing sample 16
+INFO 2025-09-25 01:31:43,878 saved test results
+INFO 2025-09-25 01:31:43,878 ----------------------------------------------------------------------------------------------------

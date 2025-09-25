@@ -1,0 +1,1 @@
+2025-09-25 01:36:17,571 - 878e75e86cc3f7e5029eb5c3d8e5412fdf6a50bbd0579901a6b94c4d2ee4bf38 - WARNING - Expected 201 but got 400 for user registration {'email': 'user1@example.com', 'username': 'user1', 'password': 'pass1'}
