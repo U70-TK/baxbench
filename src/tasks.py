@@ -48,6 +48,8 @@ class ContainerRunner:
     logger: logging.Logger
     _container: Container | None = None
     _port: int | None = None
+    max_retries: int = 5
+    delay: float = 1.0 
 
     def __enter__(self) -> Self:
         while self._port is None:
@@ -62,27 +64,35 @@ class ContainerRunner:
 
         # make sure that the server is online before we process, otherwise let it fail
         start = time.time()
-        while True:
+        for attempt in range(self.max_retries):
             try:
-                response = requests.get(f"http://localhost:{self._port}")
+                response = requests.get(f"http://localhost:{self._port}", timeout=2)
                 self.logger.info("Server is up! Server response: %s", response)
                 break
             except requests.ConnectionError as e:
                 self.logger.warning("Server is not up yet: %s", e)
-            if time.time() - start > self.env.wait_to_start_time:
-                self.logger.error("Server did not start in time")
-                self.__exit__(*exc_info())
-            self.logger.info("Waiting for server to start...")
-            time.sleep(1.0)
+            time.sleep(self.delay)
+        else:
+            self.logger.error(
+                "Server did not start in time after %d retries (%.1f seconds)",
+                self.max_retries,
+                self.max_retries * self.delay,
+            )
+            self.__exit__(*exc_info())
+            raise TimeoutError("Server did not start in time")
+
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:  # type: ignore[no-untyped-def]
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         assert self.container is not None
         assert self._port is not None
-        container_logs = cast(
-            bytes, self.container.logs(stdout=True, stderr=True, follow=False)
-        )
-        self.logger.info("container logs:\n%s", container_logs.decode())
+        try:
+            container_logs = cast(
+                bytes, self.container.logs(stdout=True, stderr=True, follow=False)
+            )
+            self.logger.info("container logs:\n%s", container_logs.decode())
+        except Exception as e:
+            self.logger.warning("Could not fetch container logs: %s", e)
         self.container.remove(force=True)
         self.port_manager.release_slot(self._port)
         self.logger.info("-" * 100)
@@ -216,34 +226,9 @@ class Task:
         vllm: bool,
         vllm_port: int,
     ) -> None:
-        # check if there are already some results generated
-        last_sample = -1
-        for sample in range(batch_size):
-            sample_dir = self.get_sample_dir(results_dir, sample)
-            if sample_dir.exists() and (
-                not (self.get_code_dir(results_dir, sample) / "failed").exists()
-                or skip_failed
-            ):
-                last_sample = sample
-            else:
-                break
-
-        last_sample = -1 if force else last_sample
-
-        if last_sample == batch_size - 1:
-            return
-        else:
-            # remove all samples after the last_sample
-            for sample in range(last_sample + 1, batch_size):
-                sample_dir = self.get_sample_dir(results_dir, sample)
-                if sample_dir.exists():
-                    shutil.rmtree(sample_dir)
 
         save_dir = self.get_save_dir(results_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
-
-        # reduce the batch size
-        batch_size = batch_size - (last_sample + 1)
 
         gen_logfile_path = save_dir / "gen.log"
         if gen_logfile_path.exists() and not force:
@@ -254,7 +239,8 @@ class Task:
             gen_logfile_path.unlink(missing_ok=True)
         else:
             prior_log = ""
-        with self.create_logger(gen_logfile_path) as logger:
+
+        with self.create_logger(gen_logfile_path) as logger, tqdm.tqdm(total=batch_size) as pbar:
             logger.info("Prior Log:\n%s", prior_log)
             logger.info(100 * "-")
             logger.info(
@@ -265,38 +251,55 @@ class Task:
                 self.reasoning_effort,
             )
 
-            prompter = Prompter(
-                env=self.env,
-                scenario=self.scenario,
-                model=self.model,
-                spec_type=self.spec_type,
-                safety_prompt=self.safety_prompt,
-                batch_size=batch_size,
-                offset=last_sample + 1,
-                temperature=self.temperature,
-                reasoning_effort=self.reasoning_effort,
-                openrouter=openrouter,
-                vllm=vllm,
-                vllm_port=vllm_port,
-                azure=self.azure,
-                azure_api_version=self.azure_api_version
-            )
-            logger.info("built prompt:\n%s", prompter.prompt)
-            logger.info("-" * 100)
+            for sample_idx in range(batch_size):
+                sample_dir = self.get_sample_dir(results_dir, sample_idx)
 
-            try:
-                prompter.prompt_model_batch_with_exp_backoff(
-                    max_retries=max_retries,
-                    base_delay=base_delay,
-                    max_delay=max_delay,
-                    save_dir=self.get_save_dir(results_dir),
-                    logger=logger,
+                if sample_dir.exists() and not force:
+                    if (self.get_code_dir(results_dir, sample_idx) / "failed").exists() and not skip_failed:
+                        logger.info(f"Sample {sample_idx} failed previously, regenerating...")
+                    else:
+                        logger.info(f"Sample {sample_idx} already exists, skipping...")
+                        pbar.update(1)
+                        continue
+
+                if force and sample_dir.exists():
+                    shutil.rmtree(sample_dir)
+
+                prompter = Prompter(
+                    env=self.env,
+                    scenario=self.scenario,
+                    model=self.model,
+                    spec_type=self.spec_type,
+                    safety_prompt=self.safety_prompt,
+                    batch_size=1,
+                    offset=sample_idx,
+                    temperature=self.temperature,
+                    reasoning_effort=self.reasoning_effort,
+                    openrouter=openrouter,
+                    vllm=vllm,
+                    vllm_port=vllm_port,
+                    azure=self.azure,
+                    azure_api_version=self.azure_api_version,
                 )
-            except KeyboardInterrupt:
-                raise
-            except Exception as e:
-                logger.exception("got exception:\n%s", str(e), exc_info=e)
-                return
+
+                logger.info(f"built prompt for sample {sample_idx}:\n{prompter.prompt}")
+                logger.info("-" * 100)
+
+                try:
+                    prompter.prompt_model_batch_with_exp_backoff(
+                        max_retries=max_retries,
+                        base_delay=base_delay,
+                        max_delay=max_delay,
+                        save_dir=save_dir,
+                        logger=logger,
+                    )
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    logger.exception("got exception:\n%s", str(e), exc_info=e)
+
+                pbar.update(1)
+
 
     def test_code(
         self,
@@ -677,7 +680,7 @@ class TaskHandler:
         vllm: bool,
         vllm_port: int,
     ) -> list[int]:
-        with tqdm.tqdm(total=len(self.tasks)) as pbar:
+        with tqdm.tqdm(total=len(self.tasks), disable=True) as pbar:
             pbar.get_lock()  # type: ignore[no-untyped-call]
 
             def run_gen_task(task: Task) -> int:

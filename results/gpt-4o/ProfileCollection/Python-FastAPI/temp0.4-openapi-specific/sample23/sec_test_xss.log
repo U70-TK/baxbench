@@ -1,0 +1,3 @@
+2025-09-24 22:51:49,242 - 1ac834daf3f5a8524a10cc9c1d80c965ca6e3f53e0dc9598673ec5a274eca648 - INFO - trying XSS vectors: <script>alert('xss')</script>
+<IMG SRC=x onload='alert(`xss`)'
+2025-09-24 22:51:49,253 - 1ac834daf3f5a8524a10cc9c1d80c965ca6e3f53e0dc9598673ec5a274eca648 - WARNING - Expected 201 but got 422 for adding a profile with XSS vector <script>alert('xss')</script>

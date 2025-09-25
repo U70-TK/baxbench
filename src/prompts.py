@@ -8,6 +8,9 @@ import traceback
 from enum import Enum
 from typing import Any, cast, no_type_check
 from venv import logger
+import sqlite3
+import tiktoken
+from datetime import datetime
 
 import httpx
 from anthropic import Anthropic
@@ -19,6 +22,56 @@ from env.base import Env
 from scenarios.base import Scenario
 
 _SYSTEM_PROMPT = "You are an experienced full-stack developer"
+
+INPUT_COST_AZURE = 1.25/1_000_000
+OUTPUT_COST_AZURE = 10/1_000_000
+THRESHOLD = 100 # 100 dollars
+
+DB_FILE = "costs.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS cost_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            model TEXT,
+            prompt_tokens INTEGER,
+            completion_tokens INTEGER,
+            est_cost REAL,
+            real_cost REAL
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def insert_estimate(model, prompt_tokens, completion_tokens, est_cost):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO cost_records (timestamp, model, prompt_tokens, completion_tokens, est_cost, real_cost)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (datetime.now(), model, prompt_tokens, completion_tokens, est_cost, None))
+    record_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return record_id
+
+def update_real_cost(record_id, real_cost):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('UPDATE cost_records SET real_cost = ? WHERE id = ?', (real_cost, record_id))
+    conn.commit()
+    conn.close()
+
+def get_total_cost():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT SUM(COALESCE(real_cost, est_cost)) FROM cost_records')
+    total = c.fetchone()[0] or 0.0
+    conn.close()
+    return total
 
 
 class KeyLocs(Enum):
@@ -103,7 +156,7 @@ class Prompter:
         "o3-2025-04-16": 100000,
         "o4-mini-2025-04-16": 100000,
         "gpt-5-2025-08-07": 128000,
-        "gpt-5": 128000
+        "gpt-5": 20000
     }
 
     openrouter_remap = {
@@ -209,6 +262,8 @@ class Prompter:
         
     @no_type_check
     def prompt_azure_openai(self, logger: logging.Logger) -> list[str]:
+        init_db()
+
         endpoint = "https://noble-m5cw7get-eastus2.cognitiveservices.azure.com/"
         deployment = self.model
         subscription_key = os.environ[KeyLocs.azure_key.value]
@@ -219,6 +274,24 @@ class Prompter:
             azure_endpoint=endpoint,
             api_key=subscription_key
         )
+
+        tentative_model_choice = "gpt-4"
+        enc = tiktoken.encoding_for_model(tentative_model_choice)
+        prompt_tokens = len(enc.encode(self.system_prompt)) + len(enc.encode(self.prompt))
+        
+        ## Local check for the cost, do it before request
+        # Local check for Cost + previous cost don't exceed an amount (roughly) ~100
+        # After we get the exact amount, update the actual cost
+        est_completion_tokens = self.openai_max_completion_tokens[self.model]
+        est_prompt_cost = prompt_tokens * INPUT_COST_AZURE
+        est_completion_cost = est_completion_tokens * OUTPUT_COST_AZURE
+        est_total = est_prompt_cost + est_completion_cost
+
+        record_id = insert_estimate(self.model, prompt_tokens, est_completion_tokens, est_total)
+        total_cost = get_total_cost()
+        if total_cost > THRESHOLD:
+            logger.error(f"Aborting: total estimated cost {total_cost:.2f} exceeds threshold {THRESHOLD}")
+            raise Exception("Cost threshold exceeded")
 
         try:
             response = client.chat.completions.create(
@@ -235,8 +308,14 @@ class Prompter:
             content = response.choices[0].message.content
             if content:
                 if response.usage is not None:
-                    logger.info(
-                        f"Token stats: {response.usage}; around {response.usage.completion_tokens} completion tokens"
+                    real_prompt_tokens = response.usage.prompt_tokens
+                    real_completion_tokens = response.usage.completion_tokens
+                    real_cost = (real_prompt_tokens * INPUT_COST_AZURE) + (real_completion_tokens * OUTPUT_COST_AZURE)
+                    update_real_cost(record_id, real_cost)
+                    logger.info( ## prompt token + completion_token, tiktoken -> calculate token, calculate cost
+                        f"Token stats: {response.usage}; "
+                        f"Real cost: ${real_cost:.4f}, "
+                        f"Total so far: ${get_total_cost():.4f}"
                     )
                 if response.choices[0].finish_reason == "length":
                     logger.warning(f"Completion was cut off due to length.")

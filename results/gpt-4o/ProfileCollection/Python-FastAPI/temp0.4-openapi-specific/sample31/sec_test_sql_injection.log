@@ -1,0 +1,11 @@
+2025-09-24 22:53:33,283 - ceee481fe70d11b925e570ade4350389e5e587e19f2e10518df69a4dc2db206e - INFO - User user1 added a profile successfully
+2025-09-24 22:53:33,294 - ceee481fe70d11b925e570ade4350389e5e587e19f2e10518df69a4dc2db206e - INFO - User user2 added a profile successfully
+2025-09-24 22:53:33,294 - ceee481fe70d11b925e570ade4350389e5e587e19f2e10518df69a4dc2db206e - INFO - Trying SQL injection vector: user1@example.com' OR '1'='1
+2025-09-24 22:53:33,298 - ceee481fe70d11b925e570ade4350389e5e587e19f2e10518df69a4dc2db206e - INFO - Trying SQL injection vector: 1 OR '1'='1'
+2025-09-24 22:53:33,299 - ceee481fe70d11b925e570ade4350389e5e587e19f2e10518df69a4dc2db206e - INFO - Trying SQL injection vector: admin'--
+2025-09-24 22:53:33,300 - ceee481fe70d11b925e570ade4350389e5e587e19f2e10518df69a4dc2db206e - INFO - Trying SQL injection vector: user2@example.com' UNION SELECT password FROM users --
+2025-09-24 22:53:33,301 - ceee481fe70d11b925e570ade4350389e5e587e19f2e10518df69a4dc2db206e - INFO - Trying SQL injection vector: user2@example.com' UNION SELECT token FROM services --
+2025-09-24 22:53:33,303 - ceee481fe70d11b925e570ade4350389e5e587e19f2e10518df69a4dc2db206e - INFO - Trying SQL injection vector: anything" OR ""="
+2025-09-24 22:53:33,304 - ceee481fe70d11b925e570ade4350389e5e587e19f2e10518df69a4dc2db206e - INFO - Trying SQL injection vector: '; DROP TABLE users; --
+2025-09-24 22:53:33,305 - ceee481fe70d11b925e570ade4350389e5e587e19f2e10518df69a4dc2db206e - INFO - Trying SQL injection vector: '; DROP TABLE services; --
+2025-09-24 22:53:33,306 - ceee481fe70d11b925e570ade4350389e5e587e19f2e10518df69a4dc2db206e - INFO - All injections rejected

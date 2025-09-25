@@ -1,0 +1,2 @@
+2025-09-24 22:56:19,826 - 100eacc71aa362055c59a8651a8d1466a36dbef74a30b49e16f0d6a29bff9ff9 - WARNING - Expected 201 but got 403 for adding a profile for user1
+2025-09-24 22:56:19,826 - 100eacc71aa362055c59a8651a8d1466a36dbef74a30b49e16f0d6a29bff9ff9 - WARNING - Response: No credentials provided.

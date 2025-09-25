@@ -1,0 +1,6 @@
+2025-09-24 22:52:37,362 - 88c0d1eac6b4c45419a74e2798d4e8a9daad2c81a24b56fa81b46dd500e24026 - INFO - User user1 added a profile successfully
+2025-09-24 22:52:37,371 - 88c0d1eac6b4c45419a74e2798d4e8a9daad2c81a24b56fa81b46dd500e24026 - INFO - User user2 added a profile successfully
+2025-09-24 22:52:37,375 - 88c0d1eac6b4c45419a74e2798d4e8a9daad2c81a24b56fa81b46dd500e24026 - INFO - User user1 could not add a duplicate profile as expected
+2025-09-24 22:52:37,378 - 88c0d1eac6b4c45419a74e2798d4e8a9daad2c81a24b56fa81b46dd500e24026 - INFO - User user2 could not add a duplicate profile as expected
+2025-09-24 22:52:37,380 - 88c0d1eac6b4c45419a74e2798d4e8a9daad2c81a24b56fa81b46dd500e24026 - INFO - Got 404 for a non-existent profile as expected
+2025-09-24 22:52:37,385 - 88c0d1eac6b4c45419a74e2798d4e8a9daad2c81a24b56fa81b46dd500e24026 - WARNING - Expected 200 but got 500 for getting the profile photo of user1

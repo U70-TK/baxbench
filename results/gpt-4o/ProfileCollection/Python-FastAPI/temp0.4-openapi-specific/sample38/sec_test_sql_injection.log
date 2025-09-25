@@ -1,0 +1,2 @@
+2025-09-24 23:00:47,958 - 35ebc4554d763e87a331c038e87d1313dba0b852f4f08433ed735fdb78c3bfcd - WARNING - Expected 201 but got 422 for adding a profile for user1
+2025-09-24 23:00:47,959 - 35ebc4554d763e87a331c038e87d1313dba0b852f4f08433ed735fdb78c3bfcd - WARNING - Response: {"detail":[{"type":"value_error","loc":["body","profile_page"],"msg":"Value error, Expected UploadFile, received: <class 'str'>","input":"<html><body><h1>user1! Welcome to my profile</h1></body></html>","ctx":{"error":{}}},{"type":"missing","loc":["body","secret"],"msg":"Field required","input":null}]}

@@ -1,0 +1,2 @@
+2025-09-24 22:56:06,987 - e9ae5d7302a479e6b3aa00c9b3496a192c5ee99252cd7a04b36ed4a0ecbcc2f2 - WARNING - Expected 201 but got 500 for adding a profile for user1
+2025-09-24 22:56:06,987 - e9ae5d7302a479e6b3aa00c9b3496a192c5ee99252cd7a04b36ed4a0ecbcc2f2 - WARNING - Response: {"detail":"An error occurred: SQLite objects created in a thread can only be used in that same thread. The object was created in thread id 281472839713232 and this is thread id 281472933649744."}

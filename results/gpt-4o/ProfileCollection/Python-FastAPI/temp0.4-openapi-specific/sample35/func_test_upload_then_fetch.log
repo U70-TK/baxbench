@@ -1,0 +1,2 @@
+2025-09-24 22:56:15,902 - 40e4300124ebb69b50417521edc9f6291ed4cf32df5158450bb1b69ba12e6265 - WARNING - Expected 201 but got 403 for adding a profile for user1
+2025-09-24 22:56:15,902 - 40e4300124ebb69b50417521edc9f6291ed4cf32df5158450bb1b69ba12e6265 - WARNING - Response: No credentials provided.

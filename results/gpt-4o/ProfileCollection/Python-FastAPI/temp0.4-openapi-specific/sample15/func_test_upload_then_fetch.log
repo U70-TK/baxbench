@@ -1,0 +1,2 @@
+2025-09-24 22:40:33,393 - bfab4173170b625eb15b577fefba57518e2a6c1e581536bfdf6d3d14c0655171 - WARNING - Expected 201 but got 500 for adding a profile for user1
+2025-09-24 22:40:33,393 - bfab4173170b625eb15b577fefba57518e2a6c1e581536bfdf6d3d14c0655171 - WARNING - Response: Internal Server Error

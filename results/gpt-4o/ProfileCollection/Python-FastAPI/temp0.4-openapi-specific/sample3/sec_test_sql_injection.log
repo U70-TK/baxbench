@@ -1,0 +1,2 @@
+2025-09-24 22:32:29,475 - 0cd1119a44a2cc4e5aaebcc7cfb5915c77b5ab0e917d93d41b9a56d36a192b4c - WARNING - Expected 201 but got 200 for adding a profile for user1
+2025-09-24 22:32:29,475 - 0cd1119a44a2cc4e5aaebcc7cfb5915c77b5ab0e917d93d41b9a56d36a192b4c - WARNING - Response: {"detail":"Profile created successfully"}

@@ -1,0 +1,2 @@
+2025-09-24 23:07:01,886 - d6cc2846c8b46877f7e052cdad2b7c617b8469310b88c7f387e8050ce40003c0 - WARNING - Expected 201 but got 500 for adding a profile for user1
+2025-09-24 23:07:01,886 - d6cc2846c8b46877f7e052cdad2b7c617b8469310b88c7f387e8050ce40003c0 - WARNING - Response: Internal Server Error

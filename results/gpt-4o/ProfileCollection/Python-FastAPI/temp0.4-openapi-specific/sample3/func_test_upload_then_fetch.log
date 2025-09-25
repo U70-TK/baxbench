@@ -1,0 +1,2 @@
+2025-09-24 22:32:25,500 - bdbaa6eae6693ea673da864ffda163fec4e43220f353c7a677d32b4dc8c76469 - WARNING - Expected 201 but got 200 for adding a profile for user1
+2025-09-24 22:32:25,500 - bdbaa6eae6693ea673da864ffda163fec4e43220f353c7a677d32b4dc8c76469 - WARNING - Response: {"detail":"Profile created successfully"}
